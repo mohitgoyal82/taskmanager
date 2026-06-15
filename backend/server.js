@@ -66,35 +66,21 @@ const LANG_NAMES = {
   ru:'Russian', bn:'Bengali', ta:'Tamil', te:'Telugu', mr:'Marathi'
 };
 
+
 async function translateText(text, targetLang) {
-  if (!targetLang || targetLang === 'en') return text;
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.warn('⚠️  ANTHROPIC_API_KEY not set — skipping translation');
-    return text;
-  }
+  if (!targetLang || targetLang === "en") return text;
   const langName = LANG_NAMES[targetLang] || targetLang;
-  console.log(`🌐 Translating to ${langName} (code: ${targetLang})...`);
+  console.log(`🌐 Translating to ${langName}...`);
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1000,
-        messages: [{ role: 'user', content: `Translate the following text to ${langName}. Reply with ONLY the translated text, no explanations:\n\n${text}` }]
-      })
-    });
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|${targetLang}`;
+    const response = await fetch(url);
     const data = await response.json();
-    if (data.error) { console.error('❌ Anthropic error:', JSON.stringify(data.error)); return text; }
-    const translated = data.content?.[0]?.text?.trim();
-    console.log(`✅ Translated: ${translated?.slice(0,80)}`);
+    if (data.responseStatus !== 200) { console.error("❌ MyMemory error:", data.responseDetails); return text; }
+    const translated = data.responseData?.translatedText?.trim();
+    console.log(`✅ Translated to ${langName}: ${translated?.slice(0,80)}`);
     return translated || text;
   } catch (err) {
-    console.error('❌ Translation fetch error:', err.message);
+    console.error("❌ Translation error:", err.message);
     return text;
   }
 }
