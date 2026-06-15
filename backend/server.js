@@ -16,6 +16,7 @@ const DB_PATH = process.env.DB_PATH || './taskflow.json';
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // needed for Twilio webhooks
 app.use(express.static(path.join(__dirname, '../frontend')));
 
 // ─── Database ─────────────────────────────────────────────────────────────────
@@ -56,7 +57,9 @@ function withJoins(task) {
   const t = cleanDoc(task);
   const assignee = t.assignee_id ? cleanDoc(usersCol.findOne({ id: t.assignee_id })) : null;
   const creator  = t.created_by  ? cleanDoc(usersCol.findOne({ id: t.created_by  })) : null;
-  return { ...t, assignee_name: assignee?.name||null, assignee_phone: assignee?.phone||null, assignee_language: assignee?.language||'en', creator_name: creator?.name||null };
+  return { ...t, assignee_name: assignee?.name||null, assignee_phone: assignee?.phone||null,
+    assignee_language: assignee?.language||'en', creator_name: creator?.name||null,
+    creator_phone: creator?.phone||null };
 }
 
 // ─── Translation ──────────────────────────────────────────────────────────────
@@ -66,21 +69,20 @@ const LANG_NAMES = {
   ru:'Russian', bn:'Bengali', ta:'Tamil', te:'Telugu', mr:'Marathi'
 };
 
-
 async function translateText(text, targetLang) {
-  if (!targetLang || targetLang === "en") return text;
+  if (!targetLang || targetLang === 'en') return text;
   const langName = LANG_NAMES[targetLang] || targetLang;
   console.log(`🌐 Translating to ${langName}...`);
   try {
     const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|${targetLang}`;
     const response = await fetch(url);
     const data = await response.json();
-    if (data.responseStatus !== 200) { console.error("❌ MyMemory error:", data.responseDetails); return text; }
+    if (data.responseStatus !== 200) { console.error('❌ MyMemory error:', data.responseDetails); return text; }
     const translated = data.responseData?.translatedText?.trim();
-    console.log(`✅ Translated to ${langName}: ${translated?.slice(0,80)}`);
+    console.log(`✅ Translated to ${langName}: ${translated?.slice(0, 80)}`);
     return translated || text;
   } catch (err) {
-    console.error("❌ Translation error:", err.message);
+    console.error('❌ Translation error:', err.message);
     return text;
   }
 }
@@ -88,7 +90,7 @@ async function translateText(text, targetLang) {
 // ─── WhatsApp ─────────────────────────────────────────────────────────────────
 async function sendWhatsApp(toPhone, message) {
   if (!process.env.TWILIO_ACCOUNT_SID || !toPhone || !twilio) {
-    console.log('📱 WhatsApp (simulated):', message.slice(0, 100));
+    console.log('📱 WhatsApp (simulated):', message.slice(0, 120));
     return { simulated: true };
   }
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -99,20 +101,152 @@ async function sendWhatsApp(toPhone, message) {
   });
 }
 
+// Build task notification message with action buttons as reply keywords
+function buildTaskMessage(task, creator, eventType) {
+  const divider = '─────────────────';
+
+  let header = '';
+  let actions = '';
+
+  if (eventType === 'assigned') {
+    header = `📋 *New Task Assigned to You!*\n${divider}`;
+    actions = task.status === 'Created'
+      ? `\n${divider}\n*Reply with a keyword to update:*\n✅ Reply *ACCEPT* → Move to In Progress\n🚫 Reply *DECLINE* → Notify manager`
+      : '';
+  } else if (eventType === 'status_changed') {
+    header = `🔄 *Task Status Updated*\n${divider}`;
+  } else if (eventType === 'reminder') {
+    header = `⏰ *Task Reminder*\n${divider}`;
+    actions = `\n${divider}\n*Reply with a keyword:*\n▶️ Reply *START* → Mark In Progress\n✅ Reply *DONE* → Mark Complete\n⚠️ Reply *DELAY* → Mark Delayed`;
+  }
+
+  // Determine what action buttons to show based on current status
+  if (eventType === 'assigned' || eventType === 'reminder') {
+    if (task.status === 'Created') {
+      actions = `\n${divider}\n*Reply to update this task:*\n▶️ *START* — Accept & move to In Progress\n⚠️ *DELAY* — Mark as Delayed\n❓ *STATUS* — Check current status`;
+    } else if (task.status === 'In Progress') {
+      actions = `\n${divider}\n*Reply to update this task:*\n✅ *DONE* — Mark as Complete\n⚠️ *DELAY* — Mark as Delayed\n❓ *STATUS* — Check current status`;
+    } else if (task.status === 'Delayed') {
+      actions = `\n${divider}\n*Reply to update this task:*\n▶️ *START* — Move back to In Progress\n✅ *DONE* — Mark as Complete\n❓ *STATUS* — Check current status`;
+    }
+  }
+
+  const msg = `${header}
+*${task.title}*
+Priority: ${task.priority}
+Status: ${task.status}${task.due_date ? '\nDue: ' + task.due_date : ''}
+Created by: ${creator || 'Manager'}${task.description ? '\n\n' + task.description : ''}${actions}`;
+
+  return msg;
+}
+
+// ─── Twilio Webhook — incoming WhatsApp replies ───────────────────────────────
+app.post('/webhook/whatsapp', async (req, res) => {
+  const from = (req.body.From || '').replace('whatsapp:', '').trim();
+  const body = (req.body.Body || '').trim().toUpperCase();
+  console.log(`📩 WhatsApp reply from ${from}: "${body}"`);
+
+  // Find user by phone number
+  const allUsers = usersCol.chain().data().map(cleanDoc);
+  const user = allUsers.find(u => u.phone && from.endsWith(u.phone.replace(/\D/g, '').slice(-10)));
+
+  if (!user) {
+    console.log(`⚠️ Unknown sender: ${from}`);
+    res.set('Content-Type', 'text/xml');
+    return res.send(`<Response><Message>Sorry, your number is not registered in TaskFlow. Please contact your manager.</Message></Response>`);
+  }
+
+  // Find their most recent active (non-complete) task
+  const allTasks = tasksCol.chain().data()
+    .filter(t => t.assignee_id === user.id && t.status !== 'Complete')
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+
+  const task = allTasks.length > 0 ? allTasks[0] : null;
+
+  // STATUS command — no task needed
+  if (body === 'STATUS') {
+    if (!task) {
+      res.set('Content-Type', 'text/xml');
+      return res.send(`<Response><Message>✅ You have no active tasks right now!</Message></Response>`);
+    }
+    const t = withJoins(task);
+    res.set('Content-Type', 'text/xml');
+    return res.send(`<Response><Message>📋 Your current task:\n\n*${t.title}*\nStatus: ${t.status}\nPriority: ${t.priority}${t.due_date ? '\nDue: ' + t.due_date : ''}\n\nReply: START, DONE, or DELAY to update.</Message></Response>`);
+  }
+
+  if (!task) {
+    res.set('Content-Type', 'text/xml');
+    return res.send(`<Response><Message>You have no active tasks to update. Contact your manager.</Message></Response>`);
+  }
+
+  const t = withJoins(task);
+  const prevStatus = task.status;
+  let newStatus = null;
+  let replyMsg = '';
+
+  // Map keywords to status transitions
+  const transitions = {
+    'START':  { from: ['Created', 'Delayed'], to: 'In Progress' },
+    'ACCEPT': { from: ['Created'],            to: 'In Progress' },
+    'DONE':   { from: ['Created', 'In Progress', 'Delayed'], to: 'Complete' },
+    'DELAY':  { from: ['Created', 'In Progress'], to: 'Delayed' },
+  };
+
+  const transition = transitions[body];
+
+  if (!transition) {
+    // Unknown keyword
+    res.set('Content-Type', 'text/xml');
+    return res.send(`<Response><Message>❓ Unknown command.\n\nYour task: *${t.title}* (${t.status})\n\nValid replies:\n▶️ START\n✅ DONE\n⚠️ DELAY\n❓ STATUS</Message></Response>`);
+  }
+
+  if (!transition.from.includes(prevStatus)) {
+    res.set('Content-Type', 'text/xml');
+    return res.send(`<Response><Message>⚠️ Cannot use ${body} when task is already "${prevStatus}".\n\nTry: ${prevStatus === 'Complete' ? 'Task is already complete!' : 'STATUS to check options.'}</Message></Response>`);
+  }
+
+  // Apply the status update
+  newStatus = transition.to;
+  task.status = newStatus;
+  task.updated_at = now();
+  tasksCol.update(task);
+  logsCol.insert({ id: uuidv4(), task_id: task.id, changed_by: user.id, field_changed: 'status', old_value: prevStatus, new_value: newStatus, created_at: now() });
+  db.saveDatabase();
+
+  console.log(`✅ Task "${task.title}" updated: ${prevStatus} → ${newStatus} by ${user.name}`);
+
+  // Build reply to assignee
+  const statusEmoji = { 'In Progress': '▶️', 'Complete': '✅', 'Delayed': '⚠️' };
+  replyMsg = `${statusEmoji[newStatus] || '🔄'} Got it, *${user.name}*!\n\nTask *${task.title}* is now *${newStatus}*.\n\nThank you for updating!`;
+  if (newStatus === 'In Progress') replyMsg += `\n\nReply *DONE* when complete or *DELAY* if blocked.`;
+  if (newStatus === 'Delayed') replyMsg += `\n\nReply *START* when you resume.`;
+
+  // Notify creator/manager
+  if (t.creator_phone) {
+    const creatorMsg = `🔔 Task Update!\n\n*${user.name}* updated task:\n*${task.title}*\n${prevStatus} → *${newStatus}*\n\nUpdated at: ${new Date().toLocaleString('en-IN')}`;
+    sendWhatsApp(t.creator_phone, creatorMsg).catch(console.error);
+  }
+
+  // Also notify all managers/supervisors who have a phone set
+  const managers = usersCol.chain().data()
+    .map(cleanDoc)
+    .filter(u => ['manager', 'supervisor'].includes(u.role) && u.phone && u.id !== t.created_by);
+  for (const mgr of managers) {
+    const mgrMsg = `🔔 *${user.name}* updated task *${task.title}*: ${prevStatus} → *${newStatus}*`;
+    sendWhatsApp(mgr.phone, mgrMsg).catch(console.error);
+  }
+
+  // Respond to Twilio with TwiML
+  res.set('Content-Type', 'text/xml');
+  res.send(`<Response><Message>${replyMsg}</Message></Response>`);
+});
+
 // ─── Debug: Test translation ──────────────────────────────────────────────────
 app.get('/api/test-translate', async (req, res) => {
   const lang = req.query.lang || 'hi';
   const text = req.query.text || 'Hello! Your task has been assigned. Please complete it urgently.';
-  console.log(`🧪 Test translate → ${lang}, API key set: ${!!process.env.ANTHROPIC_API_KEY}`);
   const translated = await translateText(text, lang);
-  res.json({
-    original: text,
-    translated,
-    lang,
-    lang_name: LANG_NAMES[lang] || lang,
-    api_key_set: !!process.env.ANTHROPIC_API_KEY,
-    translation_worked: text !== translated
-  });
+  res.json({ original: text, translated, lang, lang_name: LANG_NAMES[lang]||lang, translation_worked: text !== translated });
 });
 
 // ─── Users ────────────────────────────────────────────────────────────────────
@@ -160,13 +294,16 @@ app.post('/api/tasks', async (req, res) => {
   if (!creator || !['manager','supervisor'].includes(creator.role))
     return res.status(403).json({ error: 'Only managers or supervisors can create tasks' });
   const id = uuidv4();
-  const task = tasksCol.insert({ id, title, description: description||'', status: 'Created', priority: priority||'Medium', assignee_id: assignee_id||null, created_by, due_date: due_date||null, created_at: now(), updated_at: now() });
+  const task = tasksCol.insert({ id, title, description: description||'', status: 'Created',
+    priority: priority||'Medium', assignee_id: assignee_id||null, created_by,
+    due_date: due_date||null, created_at: now(), updated_at: now() });
   logsCol.insert({ id: uuidv4(), task_id: id, changed_by: created_by, field_changed: 'status', old_value: null, new_value: 'Created', created_at: now() });
   db.saveDatabase();
   const result = withJoins(task);
   if (result.assignee_phone) {
-    const msgEN = `📋 New task assigned to you!\n\n*${title}*\nPriority: ${priority||'Medium'}\nStatus: Created\nCreated by: ${creator.name}${due_date ? '\nDue: '+due_date : ''}\n\n${description||''}`;
-    translateText(msgEN, result.assignee_language).then(msg => sendWhatsApp(result.assignee_phone, msg).catch(console.error));
+    const msgEN = buildTaskMessage(result, creator.name, 'assigned');
+    translateText(msgEN, result.assignee_language)
+      .then(msg => sendWhatsApp(result.assignee_phone, msg).catch(console.error));
   }
   res.json(result);
 });
@@ -185,14 +322,16 @@ app.put('/api/tasks/:id', async (req, res) => {
   tasksCol.update(task);
   for (const field of ['status','priority','assignee_id','title']) {
     if (req.body[field] !== undefined && req.body[field] !== prev[field]) {
-      logsCol.insert({ id: uuidv4(), task_id: task.id, changed_by: updated_by||null, field_changed: field, old_value: prev[field], new_value: req.body[field], created_at: now() });
+      logsCol.insert({ id: uuidv4(), task_id: task.id, changed_by: updated_by||null,
+        field_changed: field, old_value: prev[field], new_value: req.body[field], created_at: now() });
     }
   }
   db.saveDatabase();
   const result = withJoins(task);
   if (status && status !== prev.status && result.assignee_phone) {
-    const msgEN = `🔄 Task status updated!\n\n*${task.title}*\nStatus: ${prev.status} → *${status}*\nPriority: ${task.priority}`;
-    translateText(msgEN, result.assignee_language).then(msg => sendWhatsApp(result.assignee_phone, msg).catch(console.error));
+    const msgEN = buildTaskMessage(result, result.creator_name, 'status_changed');
+    translateText(msgEN, result.assignee_language)
+      .then(msg => sendWhatsApp(result.assignee_phone, msg).catch(console.error));
   }
   res.json(result);
 });
@@ -202,15 +341,15 @@ app.delete('/api/tasks/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── Notify (manual WhatsApp) ─────────────────────────────────────────────────
+// ─── Notify (manual WhatsApp with action buttons) ─────────────────────────────
 app.post('/api/tasks/:id/notify', async (req, res) => {
   const task = tasksCol.findOne({ id: req.params.id });
   if (!task) return res.status(404).json({ error: 'Task not found' });
   const t = withJoins(task);
   const { message, lang } = req.body;
   const targetLang = lang || t.assignee_language || 'en';
-  const baseMsg = message || `📋 Task Reminder: *${t.title}*\nStatus: ${t.status}\nPriority: ${t.priority}`;
-  console.log(`📱 Notify: assignee_language=${t.assignee_language}, lang param=${lang}, using=${targetLang}`);
+  const baseMsg = message || buildTaskMessage(t, t.creator_name, 'reminder');
+  console.log(`📱 Notify: lang=${targetLang}`);
   const translated = await translateText(baseMsg, targetLang);
   try {
     const result = await sendWhatsApp(t.assignee_phone, translated);
@@ -235,5 +374,8 @@ app.get('*', (req, res) => {
 });
 
 initDB().then(() => {
-  app.listen(PORT, () => console.log(`🚀 TaskFlow running on http://localhost:${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`🚀 TaskFlow running on http://localhost:${PORT}`);
+    console.log(`📱 WhatsApp webhook: POST /webhook/whatsapp`);
+  });
 });

@@ -180,3 +180,31 @@ taskflow/
 | Jean Assignee | Assignee (French) |
 
 Add phone numbers to users to enable WhatsApp.
+
+---
+
+## WhatsApp Reply Actions (Assignee → Task Update)
+
+When a task is assigned or a reminder is sent, the assignee receives action keywords they can reply with:
+
+| Assignee replies | What happens |
+|---|---|
+| `START` or `ACCEPT` | Task moves → **In Progress** |
+| `DONE` | Task moves → **Complete** |
+| `DELAY` | Task moves → **Delayed** |
+| `STATUS` | Bot replies with current task details |
+
+When an assignee replies, the task updates automatically in the app AND the manager/creator gets a WhatsApp notification.
+
+### Setting up the Twilio Webhook
+
+1. Deploy your app and get your public URL (e.g. `https://taskflow.railway.app`)
+2. In Twilio Console → **Messaging → Settings → WhatsApp Sandbox Settings**
+3. Set **"When a message comes in"** to:
+   ```
+   https://your-app-url.railway.app/webhook/whatsapp
+   ```
+   Method: **HTTP POST**
+4. Save — done! Assignees can now reply to update tasks.
+
+> **Important:** Make sure manager/supervisor phone numbers are also saved in the Team page so they receive update notifications when assignees reply.
