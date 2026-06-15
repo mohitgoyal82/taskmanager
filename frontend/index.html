@@ -285,6 +285,33 @@
     .list-header, .task-row { grid-template-columns: 2fr 1fr 1fr 80px; }
     .list-header .h-assignee, .list-header .h-due, .task-row .cell-assignee, .task-row .cell-due { display: none; }
   }
+
+  /* ── Speech to Text ── */
+  .input-with-mic { position: relative; display: flex; align-items: center; }
+  .input-with-mic input, .input-with-mic textarea { flex: 1; padding-right: 40px !important; }
+  .mic-btn {
+    position: absolute; right: 8px; background: none; border: none; cursor: pointer;
+    font-size: 16px; color: var(--text-muted); padding: 4px; border-radius: 4px;
+    transition: all 0.15s; line-height: 1;
+  }
+  .mic-btn-title { top: 50%; transform: translateY(-50%); }
+  .mic-btn-desc { top: 10px; }
+  .mic-btn:hover { color: var(--teal); }
+  .mic-btn.listening { color: var(--rose); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+  .voice-task-btn {
+    width: 100%; padding: 10px; border-radius: 8px; border: 1px dashed var(--teal);
+    background: var(--teal-dim); color: var(--teal); font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: var(--font); margin-bottom: 6px; transition: all 0.15s;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  .voice-task-btn:hover { background: rgba(14,165,233,0.2); }
+  .voice-task-btn.recording { border-color: var(--rose); background: rgba(244,63,94,0.1); color: var(--rose); animation: pulse 1s infinite; }
+  .voice-hint { font-size: 11px; color: var(--text-muted); text-align:center; margin-bottom: 14px; }
+  .speech-live { background: var(--bg); border: 1px solid var(--rose); border-radius: 8px;
+    padding: 10px 14px; font-size: 12.5px; color: var(--text); margin-bottom: 12px;
+    display: none; min-height: 36px; line-height: 1.5; font-style: italic; }
+  .speech-live.active { display: block; }
 </style>
 </head>
 <body>
@@ -366,14 +393,26 @@
       <button class="modal-close" onclick="closeModal('taskModal')">✕</button>
     </div>
     <div class="modal-body">
+      <!-- Voice Task Button -->
+      <button class="voice-task-btn" id="voiceTaskBtn" onclick="startVoiceTask()">
+        🎤 Speak to create task
+      </button>
+      <div class="voice-hint">Say: "Task title is Fix the login bug, assign to Carlos, priority high"</div>
+      <div class="speech-live" id="speechLive">🎤 Listening...</div>
       <div class="form-grid">
         <div class="form-group full">
           <label>Task Title *</label>
-          <input id="f-title" placeholder="e.g. Fix login page bug" />
+          <div class="input-with-mic">
+            <input id="f-title" placeholder="e.g. Fix login page bug" />
+            <button class="mic-btn mic-btn-title" id="micTitle" onclick="micField('f-title', 'micTitle')" title="Speak task title">🎤</button>
+          </div>
         </div>
         <div class="form-group full">
           <label>Description</label>
-          <textarea id="f-desc" placeholder="Describe what needs to be done..."></textarea>
+          <div class="input-with-mic">
+            <textarea id="f-desc" placeholder="Describe what needs to be done..."></textarea>
+            <button class="mic-btn mic-btn-desc" id="micDesc" onclick="micField('f-desc', 'micDesc')" title="Speak description">🎤</button>
+          </div>
         </div>
         <div class="form-group">
           <label>Priority</label>
@@ -1027,6 +1066,161 @@ function fmtDate(str) {
 function langName(code) {
   const map = { en:'English', hi:'Hindi', es:'Spanish', fr:'French', ar:'Arabic', zh:'Chinese', pt:'Portuguese', de:'German', ja:'Japanese', ko:'Korean', ru:'Russian', bn:'Bengali', ta:'Tamil', te:'Telugu', mr:'Marathi' };
   return map[code] || code || 'English';
+}
+
+
+// ─── Speech to Text ───────────────────────────────────────────────────────────
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let activeRecognition = null;
+
+function micField(fieldId, btnId) {
+  if (!SpeechRecognition) {
+    showToast('Speech not supported — use Chrome or Edge', 'error'); return;
+  }
+  const btn = document.getElementById(btnId);
+  if (activeRecognition) { activeRecognition.stop(); return; }
+
+  const rec = new SpeechRecognition();
+  rec.lang = 'en-US';
+  rec.continuous = false;
+  rec.interimResults = true;
+  activeRecognition = rec;
+
+  btn.classList.add('listening');
+  btn.textContent = '⏹️';
+
+  const field = document.getElementById(fieldId);
+  const original = field.value;
+
+  rec.onresult = (e) => {
+    const transcript = Array.from(e.results).map(r => r[0].transcript).join('');
+    field.value = (original ? original + ' ' : '') + transcript;
+  };
+  rec.onerror = (e) => { showToast('Mic error: ' + e.error, 'error'); };
+  rec.onend = () => {
+    btn.classList.remove('listening');
+    btn.textContent = '🎤';
+    activeRecognition = null;
+  };
+  rec.start();
+}
+
+function startVoiceTask() {
+  if (!SpeechRecognition) {
+    showToast('Speech not supported — use Chrome or Edge', 'error'); return;
+  }
+  const btn = document.getElementById('voiceTaskBtn');
+  const liveDiv = document.getElementById('speechLive');
+
+  if (activeRecognition) { activeRecognition.stop(); return; }
+
+  const rec = new SpeechRecognition();
+  rec.lang = 'en-US';
+  rec.continuous = false;
+  rec.interimResults = true;
+  activeRecognition = rec;
+
+  btn.classList.add('recording');
+  btn.innerHTML = '⏹️ Stop listening';
+  liveDiv.classList.add('active');
+  liveDiv.textContent = '🎤 Listening... speak your task';
+
+  let finalTranscript = '';
+
+  rec.onresult = (e) => {
+    let interim = '';
+    finalTranscript = '';
+    for (const result of e.results) {
+      if (result.isFinal) finalTranscript += result[0].transcript;
+      else interim += result[0].transcript;
+    }
+    liveDiv.textContent = '🎤 ' + (finalTranscript || interim);
+  };
+
+  rec.onerror = (e) => {
+    showToast('Mic error: ' + e.error, 'error');
+    liveDiv.classList.remove('active');
+  };
+
+  rec.onend = () => {
+    btn.classList.remove('recording');
+    btn.innerHTML = '🎤 Speak to create task';
+    activeRecognition = null;
+    if (finalTranscript) {
+      liveDiv.textContent = '⚙️ Parsing: "' + finalTranscript + '"';
+      parseVoiceTask(finalTranscript.trim());
+    } else {
+      liveDiv.classList.remove('active');
+    }
+  };
+
+  rec.start();
+}
+
+function parseVoiceTask(transcript) {
+  const liveDiv = document.getElementById('speechLive');
+  const t = transcript.toLowerCase();
+
+  // ── Extract title ──
+  let title = transcript;
+  // Patterns: "task title is X", "title X", "task is X", "create task X"
+  const titlePatterns = [
+    /task (?:title )?(?:is |:)(.+?)(?:,|assign|priority|due|$)/i,
+    /create (?:a )?task (?:for |to )?(.+?)(?:,|assign|priority|due|$)/i,
+    /(?:add|new) task[: ](.+?)(?:,|assign|priority|due|$)/i,
+  ];
+  for (const pat of titlePatterns) {
+    const m = transcript.match(pat);
+    if (m) { title = m[1].trim(); break; }
+  }
+
+  // ── Extract priority ──
+  let priority = 'Medium';
+  if (/critical|urgent|asap|emergency/i.test(t)) priority = 'Critical';
+  else if (/high priority|high/i.test(t)) priority = 'High';
+  else if (/low priority|low/i.test(t)) priority = 'Low';
+  else if (/medium priority|medium/i.test(t)) priority = 'Medium';
+
+  // ── Extract assignee ──
+  let assigneeId = '';
+  const assignMatch = transcript.match(/assign(?:ed)? to ([A-Za-z]+)/i);
+  if (assignMatch) {
+    const name = assignMatch[1].toLowerCase();
+    const found = users.find(u => u.name.toLowerCase().includes(name));
+    if (found) assigneeId = found.id;
+  }
+
+  // ── Extract due date ──
+  let dueDate = '';
+  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+  const nextWeek = new Date(); nextWeek.setDate(nextWeek.getDate() + 7);
+  if (/tomorrow/i.test(t)) dueDate = tomorrow.toISOString().split('T')[0];
+  else if (/next week/i.test(t)) dueDate = nextWeek.toISOString().split('T')[0];
+  else if (/end of (the )?week|friday/i.test(t)) {
+    const fri = new Date(); fri.setDate(fri.getDate() + (5 - fri.getDay() + 7) % 7);
+    dueDate = fri.toISOString().split('T')[0];
+  }
+
+  // ── Extract description ──
+  let desc = '';
+  const descMatch = transcript.match(/description[: ](.+?)(?:,|priority|assign|due|$)/i);
+  if (descMatch) desc = descMatch[1].trim();
+
+  // ── Fill the form ──
+  document.getElementById('f-title').value = title;
+  document.getElementById('f-desc').value = desc;
+  document.getElementById('f-priority').value = priority;
+  if (assigneeId) document.getElementById('f-assignee').value = assigneeId;
+  if (dueDate) document.getElementById('f-due').value = dueDate;
+
+  liveDiv.textContent = '✅ Filled! Review and save — or speak again to redo.';
+  liveDiv.style.borderColor = 'var(--green)';
+  setTimeout(() => {
+    liveDiv.classList.remove('active');
+    liveDiv.style.borderColor = '';
+  }, 3000);
+
+  showToast('🎤 Task filled from voice!', 'success');
 }
 
 init();
