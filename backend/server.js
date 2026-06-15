@@ -76,8 +76,22 @@ function withJoins(task) {
 }
 
 // ─── Translation ──────────────────────────────────────────────────────────────
+const LANG_NAMES = {
+  en:'English', hi:'Hindi', es:'Spanish', fr:'French', ar:'Arabic',
+  zh:'Chinese', pt:'Portuguese', de:'German', ja:'Japanese', ko:'Korean',
+  ru:'Russian', bn:'Bengali', ta:'Tamil', te:'Telugu', mr:'Marathi'
+};
+
 async function translateText(text, targetLang) {
-  if (!targetLang || targetLang === 'en' || !process.env.ANTHROPIC_API_KEY || !fetch) return text;
+  if (!targetLang || targetLang === 'en') return text;
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.warn('⚠️  ANTHROPIC_API_KEY not set — skipping translation');
+    return text;
+  }
+  if (!fetch) { console.warn('⚠️  fetch not available'); return text; }
+
+  const langName = LANG_NAMES[targetLang] || targetLang;
+  console.log(`🌐 Translating to ${langName}...`);
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -88,12 +102,15 @@ async function translateText(text, targetLang) {
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 500,
-        messages: [{ role: 'user', content: `Translate the following text to ${targetLang} language. Reply with ONLY the translated text, nothing else:\n\n${text}` }]
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: `Translate the following text to ${langName}. Reply with ONLY the translated text, no explanations:\n\n${text}` }]
       })
     });
     const data = await response.json();
-    return data.content?.[0]?.text?.trim() || text;
+    if (data.error) { console.error('Anthropic API error:', data.error); return text; }
+    const translated = data.content?.[0]?.text?.trim();
+    console.log(`✅ Translated to ${langName}: ${translated?.slice(0,60)}...`);
+    return translated || text;
   } catch (err) {
     console.error('Translation error:', err.message);
     return text;
