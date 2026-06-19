@@ -4,20 +4,46 @@ const cors = require('cors');
 const loki = require('lokijs');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
+const fs = require('fs');
 
 let twilio = null;
 try { twilio = require('twilio'); } catch(e) {}
 let fetch = null;
 try { fetch = require('node-fetch'); } catch(e) {}
+let multer = null;
+try { multer = require('multer'); } catch(e) {}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const DB_PATH = process.env.DB_PATH || './taskflow.json';
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
+// Must be set in production so Twilio can fetch the image (e.g. https://taskflow.up.railway.app)
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
+
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false })); // needed for Twilio webhooks
 app.use(express.static(path.join(__dirname, '../frontend')));
+app.use('/uploads', express.static(UPLOADS_DIR));
+
+// ─── File upload config ────────────────────────────────────────────────────────
+const storage = multer ? multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname) || '.jpg';
+    cb(null, `${uuidv4()}${ext}`);
+  }
+}) : null;
+const upload = multer ? multer({
+  storage,
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (/^image\/(jpeg|png|gif|webp)$/.test(file.mimetype)) cb(null, true);
+    else cb(new Error('Only image files are allowed'));
+  }
+}) : null;
 
 // ─── Database ─────────────────────────────────────────────────────────────────
 let db, usersCol, tasksCol, logsCol;
@@ -59,7 +85,8 @@ function withJoins(task) {
   const creator  = t.created_by  ? cleanDoc(usersCol.findOne({ id: t.created_by  })) : null;
   return { ...t, assignee_name: assignee?.name||null, assignee_phone: assignee?.phone||null,
     assignee_language: assignee?.language||'en', creator_name: creator?.name||null,
-    creator_phone: creator?.phone||null };
+    creator_phone: creator?.phone||null,
+    image_full_url: t.image_url ? (PUBLIC_BASE_URL ? PUBLIC_BASE_URL + t.image_url : t.image_url) : null };
 }
 
 // ─── Translation ──────────────────────────────────────────────────────────────
@@ -88,17 +115,25 @@ async function translateText(text, targetLang) {
 }
 
 // ─── WhatsApp ─────────────────────────────────────────────────────────────────
-async function sendWhatsApp(toPhone, message) {
+async function sendWhatsApp(toPhone, message, mediaUrl) {
   if (!process.env.TWILIO_ACCOUNT_SID || !toPhone || !twilio) {
-    console.log('📱 WhatsApp (simulated):', message.slice(0, 120));
+    console.log('📱 WhatsApp (simulated):', message.slice(0, 120), mediaUrl ? `[image: ${mediaUrl}]` : '');
     return { simulated: true };
   }
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  return await client.messages.create({
+  const payload = {
     from: `whatsapp:${process.env.TWILIO_WHATSAPP_FROM}`,
     to: `whatsapp:${toPhone}`,
     body: message
-  });
+  };
+  if (mediaUrl) {
+    if (!/^https?:\/\//.test(mediaUrl)) {
+      console.warn('⚠️ mediaUrl is not a public absolute URL — Twilio cannot fetch it. Set PUBLIC_BASE_URL env var.');
+    } else {
+      payload.mediaUrl = [mediaUrl];
+    }
+  }
+  return await client.messages.create(payload);
 }
 
 // Build task notification message with action buttons as reply keywords
@@ -249,6 +284,20 @@ app.get('/api/test-translate', async (req, res) => {
   res.json({ original: text, translated, lang, lang_name: LANG_NAMES[lang]||lang, translation_worked: text !== translated });
 });
 
+// ─── Image Upload ─────────────────────────────────────────────────────────────
+app.post('/api/upload', (req, res) => {
+  if (!upload) return res.status(500).json({ error: 'Upload not available — multer not installed' });
+  upload.single('image')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const relativeUrl = `/uploads/${req.file.filename}`;
+    res.json({
+      url: relativeUrl,
+      full_url: PUBLIC_BASE_URL ? PUBLIC_BASE_URL + relativeUrl : relativeUrl
+    });
+  });
+});
+
 // ─── Users ────────────────────────────────────────────────────────────────────
 app.get('/api/users', (req, res) => {
   res.json(usersCol.chain().data().map(cleanDoc).sort((a,b) => a.name.localeCompare(b.name)));
@@ -288,7 +337,7 @@ app.get('/api/tasks/:id', (req, res) => {
   res.json({ ...withJoins(task), logs });
 });
 app.post('/api/tasks', async (req, res) => {
-  const { title, description, priority, assignee_id, created_by, due_date } = req.body;
+  const { title, description, priority, assignee_id, created_by, due_date, image_url } = req.body;
   if (!title || !created_by) return res.status(400).json({ error: 'title and created_by required' });
   const creator = cleanDoc(usersCol.findOne({ id: created_by }));
   if (!creator || !['manager','supervisor'].includes(creator.role))
@@ -296,14 +345,14 @@ app.post('/api/tasks', async (req, res) => {
   const id = uuidv4();
   const task = tasksCol.insert({ id, title, description: description||'', status: 'Created',
     priority: priority||'Medium', assignee_id: assignee_id||null, created_by,
-    due_date: due_date||null, created_at: now(), updated_at: now() });
+    due_date: due_date||null, image_url: image_url||null, created_at: now(), updated_at: now() });
   logsCol.insert({ id: uuidv4(), task_id: id, changed_by: created_by, field_changed: 'status', old_value: null, new_value: 'Created', created_at: now() });
   db.saveDatabase();
   const result = withJoins(task);
   if (result.assignee_phone) {
     const msgEN = buildTaskMessage(result, creator.name, 'assigned');
     translateText(msgEN, result.assignee_language)
-      .then(msg => sendWhatsApp(result.assignee_phone, msg).catch(console.error));
+      .then(msg => sendWhatsApp(result.assignee_phone, msg, result.image_full_url).catch(console.error));
   }
   res.json(result);
 });
@@ -311,13 +360,14 @@ app.put('/api/tasks/:id', async (req, res) => {
   const task = tasksCol.findOne({ id: req.params.id });
   if (!task) return res.status(404).json({ error: 'Not found' });
   const prev = { ...task };
-  const { title, description, status, priority, assignee_id, due_date, updated_by } = req.body;
+  const { title, description, status, priority, assignee_id, due_date, updated_by, image_url } = req.body;
   if (title !== undefined) task.title = title;
   if (description !== undefined) task.description = description;
   if (status !== undefined) task.status = status;
   if (priority !== undefined) task.priority = priority;
   if (assignee_id !== undefined) task.assignee_id = assignee_id||null;
   if (due_date !== undefined) task.due_date = due_date||null;
+  if (image_url !== undefined) task.image_url = image_url||null;
   task.updated_at = now();
   tasksCol.update(task);
   for (const field of ['status','priority','assignee_id','title']) {
@@ -331,7 +381,7 @@ app.put('/api/tasks/:id', async (req, res) => {
   if (status && status !== prev.status && result.assignee_phone) {
     const msgEN = buildTaskMessage(result, result.creator_name, 'status_changed');
     translateText(msgEN, result.assignee_language)
-      .then(msg => sendWhatsApp(result.assignee_phone, msg).catch(console.error));
+      .then(msg => sendWhatsApp(result.assignee_phone, msg, result.image_full_url).catch(console.error));
   }
   res.json(result);
 });
@@ -341,19 +391,20 @@ app.delete('/api/tasks/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── Notify (manual WhatsApp with action buttons) ─────────────────────────────
+// ─── Notify (manual WhatsApp with action buttons + optional image) ───────────
 app.post('/api/tasks/:id/notify', async (req, res) => {
   const task = tasksCol.findOne({ id: req.params.id });
   if (!task) return res.status(404).json({ error: 'Task not found' });
   const t = withJoins(task);
-  const { message, lang } = req.body;
+  const { message, lang, include_image } = req.body;
   const targetLang = lang || t.assignee_language || 'en';
   const baseMsg = message || buildTaskMessage(t, t.creator_name, 'reminder');
-  console.log(`📱 Notify: lang=${targetLang}`);
+  console.log(`📱 Notify: lang=${targetLang}, image=${include_image ? t.image_full_url : 'none'}`);
   const translated = await translateText(baseMsg, targetLang);
   try {
-    const result = await sendWhatsApp(t.assignee_phone, translated);
-    res.json({ ok: true, original: baseMsg, translated, lang_used: targetLang, simulated: result.simulated||false });
+    const mediaUrl = include_image ? t.image_full_url : null;
+    const result = await sendWhatsApp(t.assignee_phone, translated, mediaUrl);
+    res.json({ ok: true, original: baseMsg, translated, lang_used: targetLang, simulated: result.simulated||false, image_sent: !!mediaUrl });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

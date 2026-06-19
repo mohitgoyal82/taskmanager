@@ -7,14 +7,17 @@ services:
       - "3001:3001"
     volumes:
       - taskflow-data:/app/data
+      - taskflow-uploads:/app/uploads
     environment:
       - PORT=3001
-      - DB_PATH=/app/data/taskflow.db
+      - DB_PATH=/app/data/taskflow.json
+      - UPLOADS_DIR=/app/uploads
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
       - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
       - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
       - TWILIO_WHATSAPP_FROM=${TWILIO_WHATSAPP_FROM}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     restart: unless-stopped
 
 volumes:
   taskflow-data:
+  taskflow-uploads:

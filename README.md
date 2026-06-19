@@ -208,3 +208,28 @@ When an assignee replies, the task updates automatically in the app AND the mana
 4. Save — done! Assignees can now reply to update tasks.
 
 > **Important:** Make sure manager/supervisor phone numbers are also saved in the Team page so they receive update notifications when assignees reply.
+
+---
+
+## Image Attachments on Tasks
+
+Managers/supervisors can attach a photo when creating or editing a task. The image:
+- Shows in the task card, list row, and detail view
+- Can optionally be sent along with WhatsApp notifications (checkbox in the WhatsApp tab)
+
+### Required env var for WhatsApp images: `PUBLIC_BASE_URL`
+
+Twilio needs to **fetch** the image from a public URL — it cannot accept a local file. Set this to your deployed app's URL with no trailing slash:
+
+```
+PUBLIC_BASE_URL=https://your-app.up.railway.app
+```
+
+Without this set, images will still display in the app UI, but won't be attached to WhatsApp messages (you'll see a console warning).
+
+### Storage note
+
+Uploaded images are saved to disk at `UPLOADS_DIR` (default: `backend/uploads`, or `/app/uploads` in Docker). On Railway/Render, attach a **persistent volume/disk** mounted at this path, or uploaded images will be lost on redeploy.
+
+- Railway: Settings → Volumes → mount at `/app/uploads`
+- Render: already configured in `render.yaml` — add a second disk entry for uploads if needed

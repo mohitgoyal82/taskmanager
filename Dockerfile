@@ -10,13 +10,14 @@ RUN cd backend && npm install --production
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 
-# Create data directory for SQLite
-RUN mkdir -p /app/data
+# Create persistent data + uploads directories
+RUN mkdir -p /app/data /app/uploads
 
 WORKDIR /app/backend
 
 ENV PORT=3001
-ENV DB_PATH=/app/data/taskflow.db
+ENV DB_PATH=/app/data/taskflow.json
+ENV UPLOADS_DIR=/app/uploads
 ENV NODE_ENV=production
 
 EXPOSE 3001

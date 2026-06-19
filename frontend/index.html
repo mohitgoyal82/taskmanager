@@ -440,6 +440,15 @@
           <label>Due Date</label>
           <input type="date" id="f-due" />
         </div>
+        <div class="form-group full">
+          <label>Attach Image (optional)</label>
+          <input type="file" id="f-image" accept="image/jpeg,image/png,image/gif,image/webp" onchange="handleImageSelect(event)" />
+          <div id="imagePreviewWrap" style="display:none;margin-top:8px;position:relative;width:fit-content">
+            <img id="imagePreview" style="max-width:200px;max-height:140px;border-radius:8px;border:1px solid var(--border);display:block" />
+            <button type="button" onclick="clearImage()" style="position:absolute;top:-8px;right:-8px;background:var(--rose);color:white;border:none;border-radius:50%;width:22px;height:22px;cursor:pointer;font-size:12px;line-height:1">✕</button>
+          </div>
+          <div id="imageUploadStatus" style="font-size:11px;color:var(--text-muted);margin-top:4px"></div>
+        </div>
       </div>
     </div>
     <div class="modal-footer">
@@ -548,6 +557,7 @@ let editingTaskId = null;
 let editingUserId = null;
 let currentDetailTask = null;
 let currentPage = 'tasks';
+let pendingImageUrl = null; // relative URL of uploaded image, set after upload completes
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
@@ -691,9 +701,12 @@ function taskRowHTML(t) {
   const initials = t.assignee_name ? t.assignee_name.split(' ').map(n => n[0]).join('').slice(0, 2) : '';
   const statusClass = t.status.replace(' ', '-');
   return `<div class="task-row priority-${t.priority}" onclick="openDetail('${t.id}')">
-    <div>
-      <div class="task-row-title">${esc(t.title)}</div>
-      ${t.description ? `<div class="task-row-sub">${esc(t.description).slice(0, 60)}${t.description.length > 60 ? '…' : ''}</div>` : ''}
+    <div style="display:flex;gap:10px;align-items:flex-start">
+      ${t.image_url ? `<img src="${t.image_url}" style="width:32px;height:32px;border-radius:6px;object-fit:cover;flex-shrink:0" />` : ''}
+      <div>
+        <div class="task-row-title">${esc(t.title)}</div>
+        ${t.description ? `<div class="task-row-sub">${esc(t.description).slice(0, 60)}${t.description.length > 60 ? '…' : ''}</div>` : ''}
+      </div>
     </div>
     <div class="cell"><span class="status-badge s-${statusClass}">${t.status}</span></div>
     <div class="cell"><span class="priority-pill p-${t.priority}">${t.priority}</span></div>
@@ -733,6 +746,7 @@ function taskCardHTML(t) {
   const due = t.due_date;
   const isOverdue = due && new Date(due) < new Date() && t.status !== 'Complete';
   return `<div class="task-card priority-${t.priority}" onclick="openDetail('${t.id}')">
+    ${t.image_url ? `<img src="${t.image_url}" style="width:100%;height:80px;object-fit:cover;border-radius:6px;margin-bottom:8px" />` : ''}
     <div class="task-title">${esc(t.title)}</div>
     <div class="task-meta">
       <span class="priority-pill p-${t.priority}">${t.priority}</span>
@@ -777,6 +791,7 @@ function renderUsersPage() {
 // ─── Task Modal ───────────────────────────────────────────────────────────────
 function openNewTask() {
   editingTaskId = null;
+  pendingImageUrl = null;
   document.getElementById('modalTitle').textContent = 'New Task';
   document.getElementById('modalSubtitle').textContent = `Creating as ${currentUser?.name || '?'}`;
   document.getElementById('f-title').value = '';
@@ -785,6 +800,9 @@ function openNewTask() {
   document.getElementById('f-status').value = 'Created';
   document.getElementById('f-assignee').value = '';
   document.getElementById('f-due').value = '';
+  document.getElementById('f-image').value = '';
+  document.getElementById('imagePreviewWrap').style.display = 'none';
+  document.getElementById('imageUploadStatus').textContent = '';
   document.getElementById('deleteBtn').style.display = 'none';
   openModal('taskModal');
 }
@@ -793,6 +811,7 @@ function openEdit(taskId) {
   const t = tasks.find(x => x.id === taskId);
   if (!t) return;
   editingTaskId = taskId;
+  pendingImageUrl = t.image_url || null;
   document.getElementById('modalTitle').textContent = 'Edit Task';
   document.getElementById('modalSubtitle').textContent = `Created by ${t.creator_name || '?'}`;
   document.getElementById('f-title').value = t.title;
@@ -801,8 +820,53 @@ function openEdit(taskId) {
   document.getElementById('f-status').value = t.status;
   document.getElementById('f-assignee').value = t.assignee_id || '';
   document.getElementById('f-due').value = t.due_date || '';
+  document.getElementById('f-image').value = '';
+  document.getElementById('imageUploadStatus').textContent = '';
+  if (t.image_url) {
+    document.getElementById('imagePreview').src = t.image_url;
+    document.getElementById('imagePreviewWrap').style.display = '';
+  } else {
+    document.getElementById('imagePreviewWrap').style.display = 'none';
+  }
   document.getElementById('deleteBtn').style.display = '';
   openModal('taskModal');
+}
+
+async function handleImageSelect(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (file.size > 8 * 1024 * 1024) { showToast('Image too large (max 8MB)', 'error'); return; }
+
+  const statusEl = document.getElementById('imageUploadStatus');
+  statusEl.textContent = '⏳ Uploading...';
+
+  // Show local preview immediately
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    document.getElementById('imagePreview').src = e.target.result;
+    document.getElementById('imagePreviewWrap').style.display = '';
+  };
+  reader.readAsDataURL(file);
+
+  const formData = new FormData();
+  formData.append('image', file);
+  try {
+    const res = await fetch('/api/upload', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    pendingImageUrl = data.url;
+    statusEl.textContent = '✅ Image attached';
+  } catch (e) {
+    statusEl.textContent = '';
+    showToast('Upload failed: ' + e.message, 'error');
+  }
+}
+
+function clearImage() {
+  pendingImageUrl = null;
+  document.getElementById('f-image').value = '';
+  document.getElementById('imagePreviewWrap').style.display = 'none';
+  document.getElementById('imageUploadStatus').textContent = '';
 }
 
 async function saveTask() {
@@ -815,6 +879,7 @@ async function saveTask() {
     status: document.getElementById('f-status').value,
     assignee_id: document.getElementById('f-assignee').value || null,
     due_date: document.getElementById('f-due').value || null,
+    image_url: pendingImageUrl,
     updated_by: currentUser?.id
   };
   try {
@@ -832,6 +897,7 @@ async function saveTask() {
     renderPage();
   } catch (e) { showToast(e.message, 'error'); }
 }
+
 
 async function deleteTask() {
   if (!editingTaskId) return;
@@ -881,6 +947,7 @@ function renderDetailOverview() {
               onclick="quickUpdateStatus('${t.id}','${s}',this)">${s}</div>`).join('')}
         </div>
       </div>
+      ${t.image_url ? `<img src="${t.image_url}" style="max-width:100%;max-height:280px;border-radius:10px;border:1px solid var(--border);object-fit:contain;cursor:pointer" onclick="window.open('${t.image_url}','_blank')" />` : ''}
       ${t.description ? `<div style="background:var(--bg);border-radius:8px;padding:12px;font-size:13.5px;line-height:1.6;color:var(--text-muted)">${esc(t.description)}</div>` : ''}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         ${detailField('Priority', `<span class="priority-pill p-${t.priority}">${t.priority}</span>`)}
@@ -940,6 +1007,13 @@ function renderDetailWhatsApp() {
         Assignee: <strong style="color:var(--text)">${t.assignee_name || 'Not assigned'}</strong>
         ${hasPhone ? `· 📱 ${t.assignee_phone} · 🌐 ${langName(t.assignee_language)}` : ' · ⚠️ No phone number set'}
       </div>
+      ${t.image_url ? `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px">
+        <img src="${t.image_url}" style="width:40px;height:40px;object-fit:cover;border-radius:6px" />
+        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--text);cursor:pointer;margin:0;text-transform:none;font-weight:500">
+          <input type="checkbox" id="wa-include-image" checked style="width:auto" /> Attach this image to the WhatsApp message
+        </label>
+      </div>` : ''}
       <label>Message</label>
       <textarea id="wa-msg" placeholder="Type a message to send..."
 >📋 Task Update: *${t.title}*
@@ -977,10 +1051,13 @@ Please action this task at your earliest convenience.</textarea>
 async function sendWA() {
   const msg = document.getElementById('wa-msg').value.trim();
   const lang = document.getElementById('wa-lang').value;
+  const includeImageEl = document.getElementById('wa-include-image');
+  const includeImage = includeImageEl ? includeImageEl.checked : false;
   if (!msg) return;
   try {
-    const result = await api('POST', `/api/tasks/${currentDetailTask.id}/notify`, { message: msg, lang });
-    showToast(result.simulated ? 'WhatsApp (simulated — add Twilio keys)' : '📱 WhatsApp sent!', 'success');
+    const result = await api('POST', `/api/tasks/${currentDetailTask.id}/notify`, { message: msg, lang, include_image: includeImage });
+    const imgNote = result.image_sent ? ' (with image)' : '';
+    showToast(result.simulated ? 'WhatsApp (simulated — add Twilio keys)' : `📱 WhatsApp sent${imgNote}!`, 'success');
   } catch(e) { showToast(e.message, 'error'); }
 }
 

@@ -7,14 +7,16 @@ services:
       - key: PORT
         value: 3001
       - key: DB_PATH
-        value: /app/data/taskflow.db
+        value: /app/data/taskflow.json
+      - key: UPLOADS_DIR
+        value: /app/data/uploads
+      - key: PUBLIC_BASE_URL
+        sync: false
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
         sync: false
       - key: TWILIO_WHATSAPP_FROM
-        sync: false
-      - key: ANTHROPIC_API_KEY
         sync: false
     disk:
       name: taskflow-data
